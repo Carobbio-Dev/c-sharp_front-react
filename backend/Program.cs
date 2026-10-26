@@ -2,6 +2,11 @@ using Microsoft.Extensions.FileProviders;
 
 var builder = WebApplication.CreateBuilder(args);
 
+// Read IP and Port configuration from appsettings.json
+var serverIp = builder.Configuration.GetValue<string>("ServerOptions:Ip") ?? "0.0.0.0";
+var serverPort = builder.Configuration.GetValue<int?>("ServerOptions:Port") ?? 5000;
+builder.WebHost.UseUrls($"http://{serverIp}:{serverPort}");
+
 // Add services to the container.
 builder.Services.AddEndpointsApiExplorer();
 
