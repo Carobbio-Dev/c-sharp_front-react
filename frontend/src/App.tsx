@@ -11,8 +11,9 @@ function App() {
     setLoading(true)
     setStatus('idle')
     try {
-      // API call using native fetch
-      const res = await fetch('http://localhost:5000/api/ping')
+      // Use relative endpoint if on same host, or fallback to http://localhost:5000/api/ping if on dev server (e.g. port 5173)
+      const apiUrl = window.location.port === '5173' ? 'http://localhost:5000/api/ping' : '/api/ping'
+      const res = await fetch(apiUrl)
       if (!res.ok) {
         throw new Error(`HTTP error! status: ${res.status}`)
       }

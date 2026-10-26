@@ -1,9 +1,11 @@
+using Microsoft.Extensions.FileProviders;
+
 var builder = WebApplication.CreateBuilder(args);
 
 // Add services to the container.
-builder.Services.AddOpenApi();
+builder.Services.AddEndpointsApiExplorer();
 
-// Configure CORS
+// Configure CORS for local development (e.g. Vite dev server on port 5173)
 builder.Services.AddCors(options =>
 {
     options.AddPolicy("AllowFrontend", policy =>
@@ -16,14 +18,38 @@ builder.Services.AddCors(options =>
 
 var app = builder.Build();
 
-// Configure the HTTP request pipeline.
-if (app.Environment.IsDevelopment())
-{
-    app.MapOpenApi();
-}
-
 app.UseCors("AllowFrontend");
 
+// Serve static frontend files from ../frontend/dist or wwwroot if present
+var frontendDistPath = Path.Combine(app.Environment.ContentRootPath, "..", "frontend", "dist");
+var wwwrootPath = Path.Combine(app.Environment.ContentRootPath, "wwwroot");
+
+string? staticPath = null;
+if (Directory.Exists(frontendDistPath))
+{
+    staticPath = frontendDistPath;
+}
+else if (Directory.Exists(wwwrootPath))
+{
+    staticPath = wwwrootPath;
+}
+
+if (staticPath != null)
+{
+    var fileProvider = new PhysicalFileProvider(Path.GetFullPath(staticPath));
+
+    app.UseDefaultFiles(new DefaultFilesOptions
+    {
+        FileProvider = fileProvider
+    });
+
+    app.UseStaticFiles(new StaticFileOptions
+    {
+        FileProvider = fileProvider
+    });
+}
+
+// API Routes
 app.MapGet("/api/ping", () =>
 {
     return Results.Ok(new
@@ -33,5 +59,23 @@ app.MapGet("/api/ping", () =>
     });
 })
 .WithName("Ping");
+
+// SPA Fallback: route unmatched requests to frontend index.html
+if (staticPath != null)
+{
+    app.MapFallback(async context =>
+    {
+        var indexPath = Path.Combine(staticPath, "index.html");
+        if (File.Exists(indexPath))
+        {
+            context.Response.ContentType = "text/html";
+            await context.Response.SendFileAsync(indexPath);
+        }
+        else
+        {
+            context.Response.StatusCode = 404;
+        }
+    });
+}
 
 app.Run();
