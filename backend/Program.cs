@@ -1,86 +1,130 @@
-using Microsoft.Extensions.FileProviders;
+using System;
+using System.IO;
+using System.Net.Http.Formatting;
+using System.Web.Http;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Owin.Cors;
+using Microsoft.Owin.FileSystems;
+using Microsoft.Owin.Hosting;
+using Microsoft.Owin.StaticFiles;
+using Owin;
 
-var builder = WebApplication.CreateBuilder(args);
-
-// Read IP and Port configuration from appsettings.json
-var serverIp = builder.Configuration.GetValue<string>("ServerOptions:Ip") ?? "0.0.0.0";
-var serverPort = builder.Configuration.GetValue<int?>("ServerOptions:Port") ?? 5000;
-builder.WebHost.UseUrls($"http://{serverIp}:{serverPort}");
-
-// Add services to the container.
-builder.Services.AddEndpointsApiExplorer();
-
-// Configure CORS for local development (e.g. Vite dev server on port 5173)
-builder.Services.AddCors(options =>
+namespace Backend
 {
-    options.AddPolicy("AllowFrontend", policy =>
+    internal class Program
     {
-        policy.WithOrigins("http://localhost:5173", "http://127.0.0.1:5173")
-              .AllowAnyHeader()
-              .AllowAnyMethod();
-    });
-});
-
-var app = builder.Build();
-
-app.UseCors("AllowFrontend");
-
-// Serve static frontend files from ../frontend/dist or wwwroot if present
-var frontendDistPath = Path.Combine(app.Environment.ContentRootPath, "..", "frontend", "dist");
-var wwwrootPath = Path.Combine(app.Environment.ContentRootPath, "wwwroot");
-
-string? staticPath = null;
-if (Directory.Exists(frontendDistPath))
-{
-    staticPath = frontendDistPath;
-}
-else if (Directory.Exists(wwwrootPath))
-{
-    staticPath = wwwrootPath;
-}
-
-if (staticPath != null)
-{
-    var fileProvider = new PhysicalFileProvider(Path.GetFullPath(staticPath));
-
-    app.UseDefaultFiles(new DefaultFilesOptions
-    {
-        FileProvider = fileProvider
-    });
-
-    app.UseStaticFiles(new StaticFileOptions
-    {
-        FileProvider = fileProvider
-    });
-}
-
-// API Routes
-app.MapGet("/api/ping", () =>
-{
-    return Results.Ok(new
-    {
-        message = "pong",
-        timestamp = DateTime.UtcNow
-    });
-})
-.WithName("Ping");
-
-// SPA Fallback: route unmatched requests to frontend index.html
-if (staticPath != null)
-{
-    app.MapFallback(async context =>
-    {
-        var indexPath = Path.Combine(staticPath, "index.html");
-        if (File.Exists(indexPath))
+        private static void Main(string[] args)
         {
-            context.Response.ContentType = "text/html";
-            await context.Response.SendFileAsync(indexPath);
-        }
-        else
-        {
-            context.Response.StatusCode = 404;
-        }
-    });
-}
+            var config = new ConfigurationBuilder()
+                .SetBasePath(Directory.GetCurrentDirectory())
+                .AddJsonFile("appsettings.json", optional: true, reloadOnChange: true)
+                .AddJsonFile("appsettings.Development.json", optional: true, reloadOnChange: true)
+                .AddEnvironmentVariables()
+                .Build();
 
-app.Run();
+            var serverIp = config["ServerOptions:Ip"] ?? "0.0.0.0";
+            var portStr = config["ServerOptions:Port"];
+            int serverPort = 5000;
+            if (!string.IsNullOrEmpty(portStr) && int.TryParse(portStr, out int parsedPort))
+            {
+                serverPort = parsedPort;
+            }
+
+            string bindIp = (serverIp == "0.0.0.0") ? "*" : serverIp;
+            string url = $"http://{bindIp}:{serverPort}/";
+
+            Console.WriteLine($"Starting server on {url}...");
+
+            using (WebApp.Start(url, app => Configuration(app, Directory.GetCurrentDirectory())))
+            {
+                Console.WriteLine($"Server listening on {url}");
+                var resetEvent = new System.Threading.ManualResetEvent(false);
+                AppDomain.CurrentDomain.ProcessExit += (sender, e) => resetEvent.Set();
+                Console.CancelKeyPress += (sender, e) =>
+                {
+                    e.Cancel = true;
+                    resetEvent.Set();
+                };
+                resetEvent.WaitOne();
+            }
+        }
+
+        public static void Configuration(IAppBuilder app, string baseDirectory)
+        {
+            app.UseCors(CorsOptions.AllowAll);
+
+            var httpConfig = new HttpConfiguration();
+            httpConfig.MapHttpAttributeRoutes();
+            httpConfig.Routes.MapHttpRoute(
+                name: "DefaultApi",
+                routeTemplate: "api/{controller}/{id}",
+                defaults: new { id = RouteParameter.Optional }
+            );
+
+            httpConfig.Formatters.Clear();
+            httpConfig.Formatters.Add(new JsonMediaTypeFormatter());
+
+            app.UseWebApi(httpConfig);
+
+            string frontendDistPath = Path.GetFullPath(Path.Combine(baseDirectory, "..", "frontend", "dist"));
+            string wwwrootPath = Path.GetFullPath(Path.Combine(baseDirectory, "wwwroot"));
+
+            string? staticPath = null;
+            if (Directory.Exists(frontendDistPath))
+            {
+                staticPath = frontendDistPath;
+            }
+            else if (Directory.Exists(wwwrootPath))
+            {
+                staticPath = wwwrootPath;
+            }
+
+            if (staticPath != null)
+            {
+                var fileSystem = new PhysicalFileSystem(staticPath);
+
+                var fileServerOptions = new FileServerOptions
+                {
+                    FileSystem = fileSystem,
+                    EnableDefaultFiles = true,
+                    EnableDirectoryBrowsing = false
+                };
+                fileServerOptions.DefaultFilesOptions.DefaultFileNames = new[] { "index.html" };
+
+                app.UseFileServer(fileServerOptions);
+
+                app.Use(async (context, next) =>
+                {
+                    await next();
+
+                    if (context.Response.StatusCode == 404 && !context.Request.Path.Value.StartsWith("/api", StringComparison.OrdinalIgnoreCase))
+                    {
+                        string indexPath = Path.Combine(staticPath, "index.html");
+                        if (File.Exists(indexPath))
+                        {
+                            context.Response.StatusCode = 200;
+                            context.Response.ContentType = "text/html";
+                            byte[] bytes = File.ReadAllBytes(indexPath);
+                            await context.Response.Body.WriteAsync(bytes, 0, bytes.Length);
+                        }
+                    }
+                });
+            }
+        }
+    }
+
+    [RoutePrefix("api")]
+    public class PingController : ApiController
+    {
+        [HttpGet]
+        [Route("ping")]
+        public IHttpActionResult Ping()
+        {
+            return Ok(new
+            {
+                message = "pong",
+                timestamp = DateTime.UtcNow
+            });
+        }
+    }
+}
